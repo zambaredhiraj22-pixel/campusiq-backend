@@ -1,0 +1,63 @@
+# Build output
+target/
+build/
+out/
+bin/
+
+# Maven
+.mvn/wrapper/maven-wrapper.jar
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+src/main/resources/application-local.properties
+src/main/resources/application-secrets.properties
+
+# Log files
+*.log
+logs/
+log/
+
+# Archive and backup files
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.bak
+*.backup
+*.tmp
+
+# Eclipse / STS
+.classpath
+.factorypath
+.project
+.settings/
+.springBeans
+.sts4-cache
+.apt_generated/
+
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# VS Code
+.vscode/
+
+# NetBeans
+nbproject/private/
+nbbuild/
+nbdist/
+.nb-gradle/
+
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Java runtime
+hs_err_pid*
+replay_pid*
