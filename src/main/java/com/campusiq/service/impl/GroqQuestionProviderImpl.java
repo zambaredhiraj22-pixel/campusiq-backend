@@ -23,9 +23,11 @@ import com.campusiq.dto.AiGeneratedQuestionResponse;
 import com.campusiq.enums.QuestionCategory;
 import com.campusiq.service.AiQuestionProvider;
 
+import lombok.extern.slf4j.Slf4j;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+@Slf4j
 @Service
 @ConditionalOnProperty(
         prefix = "campusiq.ai",
@@ -35,15 +37,30 @@ import tools.jackson.databind.ObjectMapper;
 public class GroqQuestionProviderImpl
         implements AiQuestionProvider {
 
-    private static final int MAX_QUESTIONS_PER_REQUEST = 15;
+    /*
+     * Smaller batches reduce Groq failures and keep the
+     * complete 60-question request below proxy time limits.
+     */
+    private static final int
+            MAX_QUESTIONS_PER_REQUEST = 10;
 
-    private static final int MAX_GENERATION_ATTEMPTS = 8;
+    private static final int
+            MAX_GENERATION_ATTEMPTS = 4;
 
-    private static final int MAX_RATE_LIMIT_RETRIES = 3;
+    private static final int
+            MAX_RATE_LIMIT_RETRIES = 3;
 
-    private static final long RATE_LIMIT_WAIT_MILLIS = 15000L;
+    private static final int
+            MAX_TRANSIENT_RETRIES = 2;
 
-    private static final long REQUEST_GAP_MILLIS = 2000L;
+    private static final long
+            RATE_LIMIT_WAIT_MILLIS = 15000L;
+
+    private static final long
+            REQUEST_GAP_MILLIS = 1500L;
+
+    private static final int
+            MAX_LOG_BODY_LENGTH = 1500;
 
     private final RestClient restClient;
 
@@ -53,7 +70,8 @@ public class GroqQuestionProviderImpl
 
     private final String model;
 
-    private final Object requestLock = new Object();
+    private final Object requestLock =
+            new Object();
 
     private long lastRequestTime = 0L;
 
@@ -61,10 +79,16 @@ public class GroqQuestionProviderImpl
             @Value("${campusiq.ai.groq.api-key:}")
             String apiKey,
 
-            @Value("${campusiq.ai.groq.model:openai/gpt-oss-20b}")
+            @Value(
+                    "${campusiq.ai.groq.model:"
+                            + "openai/gpt-oss-20b}"
+            )
             String model,
 
-            @Value("${campusiq.ai.groq.base-url:https://api.groq.com/openai/v1}")
+            @Value(
+                    "${campusiq.ai.groq.base-url:"
+                            + "https://api.groq.com/openai/v1}"
+            )
             String baseUrl,
 
             ObjectMapper objectMapper) {
@@ -85,7 +109,9 @@ public class GroqQuestionProviderImpl
         this.restClient =
                 RestClient.builder()
                         .baseUrl(
-                                normalizeBaseUrl(baseUrl)
+                                normalizeBaseUrl(
+                                        baseUrl
+                                )
                         )
                         .build();
     }
@@ -117,8 +143,11 @@ public class GroqQuestionProviderImpl
                 attempts < MAX_GENERATION_ATTEMPTS
         ) {
 
+            attempts++;
+
             int remaining =
-                    count - uniqueQuestions.size();
+                    count
+                            - uniqueQuestions.size();
 
             int batchSize =
                     Math.min(
@@ -127,21 +156,16 @@ public class GroqQuestionProviderImpl
                     );
 
             List<AiGeneratedQuestionResponse>
-                    batch =
-                    generateVerifiedBatch(
+                    generatedBatch =
+                    requestQuestionBatch(
                             category,
                             technicalSkill,
                             batchSize
                     );
 
-            if (batch.isEmpty()) {
-                attempts++;
-                continue;
-            }
-
             for (
                     AiGeneratedQuestionResponse question
-                    : batch
+                    : generatedBatch
             ) {
 
                 if (
@@ -152,25 +176,24 @@ public class GroqQuestionProviderImpl
                     continue;
                 }
 
-                String key =
+                String normalizedQuestion =
                         normalizeQuestionKey(
-                                question.getQuestionText()
+                                question
+                                        .getQuestionText()
                         );
 
                 uniqueQuestions.putIfAbsent(
-                        key,
+                        normalizedQuestion,
                         question
                 );
 
                 if (
                         uniqueQuestions.size()
-                                >= count
+                                == count
                 ) {
                     break;
                 }
             }
-
-            attempts++;
         }
 
         if (
@@ -180,9 +203,10 @@ public class GroqQuestionProviderImpl
 
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
-                    "Groq could generate and verify only "
+                    "Groq generated only "
                             + uniqueQuestions.size()
-                            + " valid unique questions instead of "
+                            + " valid unique questions "
+                            + "instead of "
                             + count
             );
         }
@@ -193,61 +217,17 @@ public class GroqQuestionProviderImpl
     }
 
     private List<AiGeneratedQuestionResponse>
-            generateVerifiedBatch(
+            requestQuestionBatch(
                     QuestionCategory category,
                     String technicalSkill,
                     int count) {
 
-        List<AiGeneratedQuestionResponse>
-                generated =
-                requestQuestionBatch(
-                        buildGenerationRequestBody(
-                                category,
-                                technicalSkill,
-                                count
-                        ),
+        Map<String, Object> requestBody =
+                buildGenerationRequestBody(
                         category,
-                        technicalSkill
-                );
-
-        if (
-                !isBatchStructurallyValid(
-                        generated,
+                        technicalSkill,
                         count
-                )
-        ) {
-            return List.of();
-        }
-
-        List<AiGeneratedQuestionResponse>
-                verified =
-                requestQuestionBatch(
-                        buildVerificationRequestBody(
-                                generated,
-                                category,
-                                technicalSkill
-                        ),
-                        category,
-                        technicalSkill
                 );
-
-        if (
-                !isBatchStructurallyValid(
-                        verified,
-                        count
-                )
-        ) {
-            return List.of();
-        }
-
-        return verified;
-    }
-
-    private List<AiGeneratedQuestionResponse>
-            requestQuestionBatch(
-                    Map<String, Object> requestBody,
-                    QuestionCategory category,
-                    String technicalSkill) {
 
         try {
 
@@ -268,20 +248,39 @@ public class GroqQuestionProviderImpl
                 );
             }
 
-            String content =
+            String assistantContent =
                     extractAssistantContent(
                             responseBody
                     );
 
-            return parseGeneratedQuestions(
-                    content,
-                    category,
-                    technicalSkill
-            );
+            List<AiGeneratedQuestionResponse>
+                    questions =
+                    parseGeneratedQuestions(
+                            assistantContent,
+                            category,
+                            technicalSkill
+                    );
+
+            if (
+                    !isBatchStructurallyValid(
+                            questions,
+                            count
+                    )
+            ) {
+
+                return List.of();
+            }
+
+            return questions;
 
         } catch (
                 ResourceAccessException ex
         ) {
+
+            log.warn(
+                    "Unable to connect to Groq: {}",
+                    ex.getMessage()
+            );
 
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
@@ -298,6 +297,11 @@ public class GroqQuestionProviderImpl
                 Exception ex
         ) {
 
+            log.warn(
+                    "Invalid Groq response: {}",
+                    ex.getMessage()
+            );
+
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
                     "Invalid response received from Groq AI"
@@ -306,13 +310,22 @@ public class GroqQuestionProviderImpl
     }
 
     private String executeGroqRequest(
-            Map<String, Object> requestBody) {
+            Map<String, Object> originalRequestBody) {
 
-        for (
-                int attempt = 0;
-                attempt <= MAX_RATE_LIMIT_RETRIES;
-                attempt++
-        ) {
+        Map<String, Object>
+                effectiveRequestBody =
+                new LinkedHashMap<>(
+                        originalRequestBody
+                );
+
+        boolean jsonObjectFallbackEnabled =
+                false;
+
+        int rateLimitRetries = 0;
+
+        int transientRetries = 0;
+
+        while (true) {
 
             waitForRequestGap();
 
@@ -331,7 +344,7 @@ public class GroqQuestionProviderImpl
                                 MediaType.APPLICATION_JSON
                         )
                         .body(
-                                requestBody
+                                effectiveRequestBody
                         )
                         .retrieve()
                         .body(
@@ -346,18 +359,73 @@ public class GroqQuestionProviderImpl
                         ex.getStatusCode()
                                 .value();
 
+                String errorBody =
+                        ex.getResponseBodyAsString();
+
+                log.warn(
+                        "Groq request failed: "
+                                + "status={}, model={}, "
+                                + "response={}",
+                        status,
+                        model,
+                        sanitizeGroqErrorBody(
+                                errorBody
+                        )
+                );
+
+                /*
+                 * If strict JSON Schema is rejected,
+                 * retry once using Groq JSON Object mode.
+                 */
+                if (
+                        status == 400
+                        &&
+                        !jsonObjectFallbackEnabled
+                ) {
+
+                    effectiveRequestBody.put(
+                            "response_format",
+                            Map.of(
+                                    "type",
+                                    "json_object"
+                            )
+                    );
+
+                    jsonObjectFallbackEnabled =
+                            true;
+
+                    continue;
+                }
+
                 if (
                         status == 429
                         &&
-                        attempt < MAX_RATE_LIMIT_RETRIES
+                        rateLimitRetries
+                                < MAX_RATE_LIMIT_RETRIES
                 ) {
 
-                    long waitMillis =
-                            RATE_LIMIT_WAIT_MILLIS
-                                    * (attempt + 1L);
+                    rateLimitRetries++;
 
                     sleepSafely(
-                            waitMillis
+                            RATE_LIMIT_WAIT_MILLIS
+                                    * rateLimitRetries
+                    );
+
+                    continue;
+                }
+
+                if (
+                        status >= 500
+                        &&
+                        transientRetries
+                                < MAX_TRANSIENT_RETRIES
+                ) {
+
+                    transientRetries++;
+
+                    sleepSafely(
+                            REQUEST_GAP_MILLIS
+                                    * transientRetries
                     );
 
                     continue;
@@ -368,60 +436,6 @@ public class GroqQuestionProviderImpl
                 );
             }
         }
-
-        throw new ResponseStatusException(
-                HttpStatus.TOO_MANY_REQUESTS,
-                "Groq API rate limit was reached after automatic retries"
-        );
-    }
-
-    private void waitForRequestGap() {
-
-        synchronized (requestLock) {
-
-            long now =
-                    System.currentTimeMillis();
-
-            long elapsed =
-                    now - lastRequestTime;
-
-            long remaining =
-                    REQUEST_GAP_MILLIS
-                            - elapsed;
-
-            if (remaining > 0) {
-
-                sleepSafely(
-                        remaining
-                );
-            }
-
-            lastRequestTime =
-                    System.currentTimeMillis();
-        }
-    }
-
-    private void sleepSafely(
-            long milliseconds) {
-
-        try {
-
-            Thread.sleep(
-                    milliseconds
-            );
-
-        } catch (
-                InterruptedException ex
-        ) {
-
-            Thread.currentThread()
-                    .interrupt();
-
-            throw new ResponseStatusException(
-                    HttpStatus.SERVICE_UNAVAILABLE,
-                    "AI generation was interrupted"
-            );
-        }
     }
 
     private Map<String, Object>
@@ -430,8 +444,7 @@ public class GroqQuestionProviderImpl
                     String technicalSkill,
                     int count) {
 
-        Map<String, Object>
-                requestBody =
+        Map<String, Object> requestBody =
                 new LinkedHashMap<>();
 
         requestBody.put(
@@ -446,7 +459,7 @@ public class GroqQuestionProviderImpl
                                 "role",
                                 "system",
                                 "content",
-                                buildGenerationSystemPrompt()
+                                buildSystemPrompt()
                         ),
                         Map.of(
                                 "role",
@@ -481,157 +494,53 @@ public class GroqQuestionProviderImpl
         return requestBody;
     }
 
-    private Map<String, Object>
-            buildVerificationRequestBody(
-                    List<AiGeneratedQuestionResponse> questions,
-                    QuestionCategory category,
-                    String technicalSkill) {
-
-        Map<String, Object>
-                requestBody =
-                new LinkedHashMap<>();
-
-        requestBody.put(
-                "model",
-                model
-        );
-
-        requestBody.put(
-                "messages",
-                List.of(
-                        Map.of(
-                                "role",
-                                "system",
-                                "content",
-                                buildVerificationSystemPrompt()
-                        ),
-                        Map.of(
-                                "role",
-                                "user",
-                                "content",
-                                buildVerificationPrompt(
-                                        questions,
-                                        category,
-                                        technicalSkill
-                                )
-                        )
-                )
-        );
-
-        requestBody.put(
-                "response_format",
-                buildStructuredOutputFormat()
-        );
-
-        requestBody.put(
-                "reasoning_effort",
-                "medium"
-        );
-
-        requestBody.put(
-                "max_completion_tokens",
-                calculateMaxCompletionTokens(
-                        questions.size()
-                )
-        );
-
-        return requestBody;
-    }
-
-    private String buildGenerationSystemPrompt() {
+    private String buildSystemPrompt() {
 
         return """
-                You generate multiple-choice questions
-                for the CAMPUS-IQ college placement platform.
+                You generate high-quality multiple-choice
+                placement assessment questions for CAMPUS-IQ.
 
-                Every question must:
+                Return only a JSON object with this structure:
 
-                - be clear and unambiguous
-                - have exactly four different options
-                - have exactly one correct answer
-                - use correctOption only as A, B, C or D
-                - contain the real correct answer in exactly one option
-                - have correctOption point to that exact option
-                - avoid duplicate questions
-                - avoid duplicate options
-                - avoid all-of-the-above
-                - avoid none-of-the-above
-                - avoid missing-information questions
-                - avoid image-based questions
-                - avoid misleading questions
-                - avoid markdown
-                - contain no explanation outside the structured response
+                {
+                  "questions": [
+                    {
+                      "questionText": "Question text",
+                      "optionA": "First option",
+                      "optionB": "Second option",
+                      "optionC": "Third option",
+                      "optionD": "Fourth option",
+                      "correctOption": "A"
+                    }
+                  ]
+                }
 
-                Before returning a question,
-                solve or verify it internally.
+                Mandatory rules:
 
-                For mathematical questions,
-                calculate the exact answer first
-                and then create the four options.
+                1. Return exactly the requested number of questions.
+                2. Every question must be clear and unambiguous.
+                3. Every question must have exactly four options.
+                4. All four options must be different.
+                5. Exactly one option must be correct.
+                6. correctOption must be only A, B, C or D.
+                7. correctOption must point to the real correct answer.
+                8. Do not use "All of the above".
+                9. Do not use "None of the above".
+                10. Do not create image-dependent questions.
+                11. Do not create questions with missing information.
+                12. Do not include markdown or explanations.
+                13. Avoid duplicate questions.
+                14. Keep question and option text concise.
+                15. Verify the answer internally before returning it.
 
-                Never return a mathematical question
-                if its real answer is absent
-                from the options.
+                For aptitude questions, calculate the exact
+                mathematical answer before creating the options.
 
-                For technical questions,
-                verify the technical fact before
-                choosing correctOption.
+                For reasoning questions, independently solve
+                the logic before selecting correctOption.
 
-                Keep question wording concise.
-
-                Keep each option concise.
-
-                Return exactly the requested number
-                of questions.
-                """;
-    }
-
-    private String buildVerificationSystemPrompt() {
-
-        return """
-                You are the quality-control verifier
-                for CAMPUS-IQ assessment questions.
-
-                Do not trust the existing correctOption.
-
-                Independently solve or verify
-                every supplied question.
-
-                For each question:
-
-                - verify the question is valid
-                - verify enough information is provided
-                - verify all four options are different
-                - verify exactly one option is correct
-                - verify the actual answer is present
-                - verify correctOption points to the actual answer
-
-                For aptitude:
-                recalculate the answer from scratch.
-
-                For reasoning:
-                solve the logic independently.
-
-                For technical questions:
-                independently verify the technical fact.
-
-                If the question is invalid,
-                mathematically incorrect,
-                ambiguous,
-                outdated,
-                or the real answer is missing,
-                replace it with a new valid question
-                of the same category.
-
-                If only the answer key or options
-                are wrong, correct them.
-
-                Return exactly the same number
-                of questions.
-
-                Return only structured question data.
-
-                Do not return explanations.
+                For technical questions, verify the technical
+                fact before selecting correctOption.
                 """;
     }
 
@@ -646,47 +555,27 @@ public class GroqQuestionProviderImpl
         ) {
 
             return """
-                    Generate exactly %d unique
-                    quantitative aptitude MCQs
-                    for campus placements.
+                    Generate exactly %d unique aptitude
+                    placement questions.
 
-                    Use a balanced mixture of:
+                    Cover a balanced selection of:
 
-                    percentages,
-                    profit and loss,
-                    ratio and proportion,
-                    averages,
-                    time and work,
-                    time speed and distance,
-                    simple and compound interest,
-                    probability,
-                    number systems,
-                    quantitative reasoning.
+                    - percentages
+                    - ratios and proportions
+                    - averages
+                    - profit and loss
+                    - time and work
+                    - time, speed and distance
+                    - simple and compound interest
+                    - number systems
+                    - probability
+                    - data interpretation
 
-                    For every question:
+                    Use placement-test difficulty.
 
-                    solve it first,
-                    calculate the exact result,
-                    place that result in exactly one option,
-                    create three incorrect distractors,
-                    recheck the calculation,
-                    then set correctOption.
-
-                    Prefer integer or simple decimal answers.
-
-                    If rounding is needed,
-                    state the rounding rule.
-
-                    Never create a question
-                    whose actual answer is absent
-                    from the options.
-
-                    Keep each question reasonably short.
-
-                    Return exactly %d questions.
+                    Return only the required JSON object.
                     """
                     .formatted(
-                            count,
                             count
                     );
         }
@@ -697,197 +586,50 @@ public class GroqQuestionProviderImpl
         ) {
 
             return """
-                    Generate exactly %d unique
-                    logical reasoning MCQs
-                    for campus placements.
+                    Generate exactly %d unique logical
+                    reasoning placement questions.
 
-                    Use a balanced mixture of:
+                    Cover a balanced selection of:
 
-                    number series,
-                    alphabet series,
-                    coding and decoding,
-                    syllogisms,
-                    directions,
-                    blood relations,
-                    analogies,
-                    logical sequences,
-                    classification,
-                    statement reasoning.
+                    - number and letter series
+                    - coding and decoding
+                    - blood relations
+                    - directions
+                    - syllogisms
+                    - analogies
+                    - classification
+                    - logical arrangements
+                    - statement and conclusion
+                    - pattern recognition
 
-                    Solve each question internally.
+                    Use placement-test difficulty.
 
-                    Ensure exactly one option
-                    is logically correct.
-
-                    Do not create questions
-                    with insufficient information.
-
-                    Avoid visual puzzles.
-
-                    Keep each question reasonably short.
-
-                    Return exactly %d questions.
+                    Return only the required JSON object.
                     """
                     .formatted(
-                            count,
                             count
                     );
         }
 
         return """
-                Generate exactly %d unique
-                technical MCQs for campus placements.
+                Generate exactly %d unique technical
+                placement questions for this skill:
 
-                Technical skill:
                 %s
 
-                Questions must be specifically
-                related to %s.
+                Questions must test practical understanding,
+                core concepts, debugging knowledge and
+                interview-level technical fundamentals.
 
-                Test:
+                Every question must belong only to the
+                specified technical skill.
 
-                fundamentals,
-                concepts,
-                syntax,
-                behavior,
-                practical knowledge,
-                interview knowledge,
-                problem solving.
-
-                Verify every technical fact
-                before selecting correctOption.
-
-                Avoid obsolete or
-                version-dependent claims
-                unless the version is stated.
-
-                Ensure exactly one option
-                is correct.
-
-                Keep questions concise.
-
-                Return exactly %d questions.
+                Return only the required JSON object.
                 """
                 .formatted(
                         count,
-                        technicalSkill,
-                        technicalSkill,
-                        count
+                        technicalSkill
                 );
-    }
-
-    private String buildVerificationPrompt(
-            List<AiGeneratedQuestionResponse> questions,
-            QuestionCategory category,
-            String technicalSkill) {
-
-        try {
-
-            List<Map<String, String>>
-                    inputQuestions =
-                    new ArrayList<>();
-
-            for (
-                    AiGeneratedQuestionResponse question
-                    : questions
-            ) {
-
-                Map<String, String>
-                        value =
-                        new LinkedHashMap<>();
-
-                value.put(
-                        "questionText",
-                        question.getQuestionText()
-                );
-
-                value.put(
-                        "optionA",
-                        question.getOptionA()
-                );
-
-                value.put(
-                        "optionB",
-                        question.getOptionB()
-                );
-
-                value.put(
-                        "optionC",
-                        question.getOptionC()
-                );
-
-                value.put(
-                        "optionD",
-                        question.getOptionD()
-                );
-
-                value.put(
-                        "correctOption",
-                        question.getCorrectOption()
-                );
-
-                inputQuestions.add(
-                        value
-                );
-            }
-
-            String json =
-                    objectMapper
-                            .writeValueAsString(
-                                    inputQuestions
-                            );
-
-            String skill =
-                    category
-                            == QuestionCategory.TECHNICAL
-                            ? technicalSkill
-                            : "Not applicable";
-
-            return """
-                    Category:
-                    %s
-
-                    Technical skill:
-                    %s
-
-                    Independently verify these
-                    %d questions.
-
-                    Do not trust the supplied
-                    correctOption.
-
-                    Fix or replace every invalid
-                    question.
-
-                    Preserve the category.
-
-                    For technical questions,
-                    preserve the technical skill.
-
-                    Return exactly %d
-                    verified questions.
-
-                    Questions:
-
-                    %s
-                    """
-                    .formatted(
-                            category.name(),
-                            skill,
-                            questions.size(),
-                            questions.size(),
-                            json
-                    );
-
-        } catch (
-                Exception ex
-        ) {
-
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_GATEWAY,
-                    "Unable to prepare AI question verification request"
-            );
-        }
     }
 
     private Map<String, Object>
@@ -1096,15 +838,11 @@ public class GroqQuestionProviderImpl
             );
         }
 
-        JsonNode firstChoice =
-                choices.get(
-                        0
-                );
-
         JsonNode message =
-                firstChoice.get(
-                        "message"
-                );
+                choices.get(0)
+                        .get(
+                                "message"
+                        );
 
         if (message == null) {
 
@@ -1129,13 +867,57 @@ public class GroqQuestionProviderImpl
 
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
-                    "Groq response does not contain generated question data"
+                    "Groq response does not contain question data"
             );
         }
 
-        return content
-                .asText()
-                .trim();
+        return cleanJsonContent(
+                content.asText()
+        );
+    }
+
+    private String cleanJsonContent(
+            String content) {
+
+        String cleaned =
+                content.trim();
+
+        if (
+                cleaned.startsWith(
+                        "```json"
+                )
+        ) {
+
+            cleaned =
+                    cleaned.substring(
+                            7
+                    );
+        } else if (
+                cleaned.startsWith(
+                        "```"
+                )
+        ) {
+
+            cleaned =
+                    cleaned.substring(
+                            3
+                    );
+        }
+
+        if (
+                cleaned.endsWith(
+                        "```"
+                )
+        ) {
+
+            cleaned =
+                    cleaned.substring(
+                            0,
+                            cleaned.length() - 3
+                    );
+        }
+
+        return cleaned.trim();
     }
 
     private List<AiGeneratedQuestionResponse>
@@ -1163,7 +945,7 @@ public class GroqQuestionProviderImpl
 
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
-                    "Groq response does not contain a questions array"
+                    "Groq response does not contain questions array"
             );
         }
 
@@ -1176,8 +958,7 @@ public class GroqQuestionProviderImpl
                 : questionsNode
         ) {
 
-            AiGeneratedQuestionResponse
-                    question =
+            AiGeneratedQuestionResponse question =
                     new AiGeneratedQuestionResponse();
 
             question.setQuestionText(
@@ -1220,6 +1001,10 @@ public class GroqQuestionProviderImpl
                             node,
                             "correctOption"
                     )
+                            .trim()
+                            .toUpperCase(
+                                    Locale.ROOT
+                            )
             );
 
             question.setCategory(
@@ -1263,8 +1048,7 @@ public class GroqQuestionProviderImpl
             return false;
         }
 
-        Set<String>
-                questionKeys =
+        Set<String> questionKeys =
                 new HashSet<>();
 
         for (
@@ -1282,7 +1066,8 @@ public class GroqQuestionProviderImpl
 
             String key =
                     normalizeQuestionKey(
-                            question.getQuestionText()
+                            question
+                                    .getQuestionText()
                     );
 
             if (
@@ -1357,8 +1142,7 @@ public class GroqQuestionProviderImpl
                 correctOption
         );
 
-        List<String>
-                options =
+        List<String> options =
                 List.of(
                         question.getOptionA(),
                         question.getOptionB(),
@@ -1366,37 +1150,29 @@ public class GroqQuestionProviderImpl
                         question.getOptionD()
                 );
 
-        Set<String>
-                normalizedOptions =
+        Set<String> normalizedOptions =
                 new HashSet<>();
 
-        for (
-                String option
-                : options
-        ) {
+        for (String option : options) {
 
-            String normalized =
+            String normalizedOption =
                     normalizeOptionKey(
                             option
                     );
 
             if (
-                    normalized.isBlank()
+                    normalizedOption.isBlank()
                     ||
-                    normalized.equals(
+                    normalizedOption.equals(
                             "all of the above"
                     )
                     ||
-                    normalized.equals(
+                    normalizedOption.equals(
                             "none of the above"
                     )
-            ) {
-                return false;
-            }
-
-            if (
+                    ||
                     !normalizedOptions.add(
-                            normalized
+                            normalizedOption
                     )
             ) {
                 return false;
@@ -1410,17 +1186,17 @@ public class GroqQuestionProviderImpl
             JsonNode node,
             String fieldName) {
 
-        JsonNode value =
+        JsonNode field =
                 node.get(
                         fieldName
                 );
 
         if (
-                value == null
+                field == null
                 ||
-                !value.isTextual()
+                !field.isTextual()
                 ||
-                value.asText().isBlank()
+                field.asText().isBlank()
         ) {
 
             throw new ResponseStatusException(
@@ -1430,45 +1206,154 @@ public class GroqQuestionProviderImpl
             );
         }
 
-        return value
+        return field
                 .asText()
                 .trim();
     }
 
-    private boolean isBlank(
-            String value) {
+    private void waitForRequestGap() {
 
-        return value == null
+        synchronized (requestLock) {
+
+            long currentTime =
+                    System.currentTimeMillis();
+
+            long elapsed =
+                    currentTime
+                            - lastRequestTime;
+
+            long remaining =
+                    REQUEST_GAP_MILLIS
+                            - elapsed;
+
+            if (remaining > 0) {
+
+                sleepSafely(
+                        remaining
+                );
+            }
+
+            lastRequestTime =
+                    System.currentTimeMillis();
+        }
+    }
+
+    private void sleepSafely(
+            long milliseconds) {
+
+        try {
+
+            Thread.sleep(
+                    milliseconds
+            );
+
+        } catch (
+                InterruptedException ex
+        ) {
+
+            Thread.currentThread()
+                    .interrupt();
+
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "AI generation was interrupted"
+            );
+        }
+    }
+
+    private String sanitizeGroqErrorBody(
+            String responseBody) {
+
+        if (
+                responseBody == null
                 ||
-                value.isBlank();
+                responseBody.isBlank()
+        ) {
+            return "<empty>";
+        }
+
+        String sanitized =
+                responseBody
+                        .replaceAll(
+                                "(?i)gsk_[a-zA-Z0-9_-]+",
+                                "[REDACTED_GROQ_KEY]"
+                        )
+                        .replaceAll(
+                                "[\\r\\n\\t]+",
+                                " "
+                        );
+
+        if (
+                sanitized.length()
+                        <= MAX_LOG_BODY_LENGTH
+        ) {
+            return sanitized;
+        }
+
+        return sanitized.substring(
+                0,
+                MAX_LOG_BODY_LENGTH
+        ) + "...";
     }
 
-    private String normalizeQuestionKey(
-            String questionText) {
+    private ResponseStatusException
+            mapGroqError(
+                    RestClientResponseException ex) {
 
-        return questionText
-                .trim()
-                .toLowerCase(
-                        Locale.ROOT
-                )
-                .replaceAll(
-                        "\\s+",
-                        " "
-                );
-    }
+        int status =
+                ex.getStatusCode()
+                        .value();
 
-    private String normalizeOptionKey(
-            String option) {
+        if (status == 400) {
 
-        return option
-                .trim()
-                .toLowerCase(
-                        Locale.ROOT
-                )
-                .replaceAll(
-                        "\\s+",
-                        " "
-                );
+            return new ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Groq rejected the AI generation request"
+            );
+        }
+
+        if (
+                status == 401
+                ||
+                status == 403
+        ) {
+
+            return new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "Groq API credentials are invalid or unauthorized"
+            );
+        }
+
+        if (status == 404) {
+
+            return new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "Configured Groq model is unavailable"
+            );
+        }
+
+        if (status == 429) {
+
+            return new ResponseStatusException(
+                    HttpStatus.TOO_MANY_REQUESTS,
+                    "Groq API rate limit was reached. "
+                            + "Please try again later."
+            );
+        }
+
+        if (status >= 500) {
+
+            return new ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Groq AI service is temporarily unavailable"
+            );
+        }
+
+        return new ResponseStatusException(
+                HttpStatus.BAD_GATEWAY,
+                "Groq API request failed with HTTP status "
+                        + status
+        );
     }
 
     private void validateProviderConfiguration() {
@@ -1529,72 +1414,49 @@ public class GroqQuestionProviderImpl
         }
     }
 
-    private ResponseStatusException
-            mapGroqError(
-                    RestClientResponseException ex) {
-
-        int status =
-                ex.getStatusCode()
-                        .value();
-
-        if (status == 400) {
-
-            return new ResponseStatusException(
-                    HttpStatus.BAD_GATEWAY,
-                    "Groq rejected the AI generation or verification request"
-            );
-        }
-
-        if (
-                status == 401
-                ||
-                status == 403
-        ) {
-
-            return new ResponseStatusException(
-                    HttpStatus.SERVICE_UNAVAILABLE,
-                    "Groq API credentials are invalid or unauthorized"
-            );
-        }
-
-        if (status == 404) {
-
-            return new ResponseStatusException(
-                    HttpStatus.SERVICE_UNAVAILABLE,
-                    "Configured Groq model is unavailable"
-            );
-        }
-
-        if (status == 429) {
-
-            return new ResponseStatusException(
-                    HttpStatus.TOO_MANY_REQUESTS,
-                    "Groq API rate limit was reached after automatic retries. Please try again later."
-            );
-        }
-
-        if (status >= 500) {
-
-            return new ResponseStatusException(
-                    HttpStatus.BAD_GATEWAY,
-                    "Groq AI service is temporarily unavailable"
-            );
-        }
-
-        return new ResponseStatusException(
-                HttpStatus.BAD_GATEWAY,
-                "Groq API request failed with HTTP status "
-                        + status
-        );
-    }
-
     private int calculateMaxCompletionTokens(
             int count) {
 
         return Math.max(
-                1800,
-                count * 260
+                1600,
+                count * 240
         );
+    }
+
+    private boolean isBlank(
+            String value) {
+
+        return value == null
+                ||
+                value.isBlank();
+    }
+
+    private String normalizeQuestionKey(
+            String questionText) {
+
+        return questionText
+                .trim()
+                .toLowerCase(
+                        Locale.ROOT
+                )
+                .replaceAll(
+                        "\\s+",
+                        " "
+                );
+    }
+
+    private String normalizeOptionKey(
+            String option) {
+
+        return option
+                .trim()
+                .toLowerCase(
+                        Locale.ROOT
+                )
+                .replaceAll(
+                        "\\s+",
+                        " "
+                );
     }
 
     private String normalizeBaseUrl(
@@ -1609,22 +1471,23 @@ public class GroqQuestionProviderImpl
             return "https://api.groq.com/openai/v1";
         }
 
-        String value =
+        String normalizedBaseUrl =
                 baseUrl.trim();
 
         while (
-                value.endsWith(
+                normalizedBaseUrl.endsWith(
                         "/"
                 )
         ) {
 
-            value =
-                    value.substring(
+            normalizedBaseUrl =
+                    normalizedBaseUrl.substring(
                             0,
-                            value.length() - 1
+                            normalizedBaseUrl.length()
+                                    - 1
                     );
         }
 
-        return value;
+        return normalizedBaseUrl;
     }
 }
