@@ -5,31 +5,44 @@ import java.util.Optional;
 
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import com.campusiq.entity.StudentMockTestAssignment;
 
+import jakarta.persistence.LockModeType;
+
 public interface StudentMockTestAssignmentRepository
-        extends JpaRepository<StudentMockTestAssignment, Long> {
+        extends JpaRepository<
+                StudentMockTestAssignment,
+                Long> {
 
     /*
-     * Student dashboard वर त्या student ला assign
-     * केलेले सर्व active personalized mock tests मिळवण्यासाठी.
+     * Returns all active personalized mock tests
+     * assigned to a particular student.
      *
-     * Latest assignment first.
+     * Latest assignment appears first.
      */
-    @EntityGraph(attributePaths = "mockTest")
+    @EntityGraph(
+            attributePaths = {
+                    "mockTest"
+            }
+    )
     List<StudentMockTestAssignment>
             findByStudentProfileIdAndActiveTrueOrderByAssignedAtDesc(
                     Long studentProfileId
             );
 
     /*
-     * Specific mock test हा त्या student ला
-     * खरंच assign झाला आहे का ते securely verify करण्यासाठी.
-     *
-     * Student test start करताना हा method important आहे.
+     * Verifies that a particular active personalized
+     * test is assigned to a particular student.
      */
-    @EntityGraph(attributePaths = "mockTest")
+    @EntityGraph(
+            attributePaths = {
+                    "mockTest"
+            }
+    )
     Optional<StudentMockTestAssignment>
             findByStudentProfileIdAndMockTestIdAndActiveTrue(
                     Long studentProfileId,
@@ -37,37 +50,97 @@ public interface StudentMockTestAssignmentRepository
             );
 
     /*
-     * Quick security/business check.
-     *
-     * true  = test assigned and active
-     * false = student ला हा personalized test access नाही
+     * Quick assignment existence check.
      */
-    boolean existsByStudentProfileIdAndMockTestIdAndActiveTrue(
-            Long studentProfileId,
-            Long mockTestId
-    );
+    boolean
+            existsByStudentProfileIdAndMockTestIdAndActiveTrue(
+                    Long studentProfileId,
+                    Long mockTestId
+            );
 
     /*
-     * Faculty/backend ला एखाद्या mock test चे
-     * assignments पाहण्यासाठी useful.
+     * Returns all student assignments for one test.
+     *
+     * This method is useful for the Faculty screen.
      */
-    @EntityGraph(attributePaths = "studentProfile")
+    @EntityGraph(
+            attributePaths = {
+                    "studentProfile",
+                    "studentProfile.user",
+                    "mockTest"
+            }
+    )
     List<StudentMockTestAssignment>
             findByMockTestIdOrderByAssignedAtDesc(
                     Long mockTestId
             );
 
     /*
-     * Same student + same test यासाठी assignment
-     * already exists का हे creation time ला check करण्यासाठी.
+     * Finds an assignment even when it is inactive.
      *
-     * Active false असला तरी database unique constraint
-     * duplicate row allow करणार नाही, म्हणून हा method
-     * active condition शिवाय ठेवला आहे.
+     * A database unique constraint prevents duplicate
+     * student + mock-test assignment rows.
      */
+    @EntityGraph(
+            attributePaths = {
+                    "studentProfile",
+                    "mockTest"
+            }
+    )
     Optional<StudentMockTestAssignment>
             findByStudentProfileIdAndMockTestId(
                     Long studentProfileId,
                     Long mockTestId
+            );
+
+    /*
+     * Locks the assignment row while a student starts
+     * a personalized test.
+     *
+     * This prevents two browser tabs from consuming
+     * the same retake permission simultaneously.
+     */
+    @Lock(
+            LockModeType.PESSIMISTIC_WRITE
+    )
+    @Query("""
+            SELECT assignment
+            FROM StudentMockTestAssignment assignment
+            JOIN FETCH assignment.studentProfile student
+            JOIN FETCH assignment.mockTest mockTest
+            WHERE student.id = :studentProfileId
+              AND mockTest.id = :mockTestId
+              AND assignment.active = true
+            """)
+    Optional<StudentMockTestAssignment>
+            findActiveAssignmentForUpdate(
+                    @Param("studentProfileId")
+                    Long studentProfileId,
+
+                    @Param("mockTestId")
+                    Long mockTestId
+            );
+
+    /*
+     * Locks the assignment row while Faculty grants
+     * a retake.
+     *
+     * The assignment ID comes from Faculty UI/API.
+     */
+    @Lock(
+            LockModeType.PESSIMISTIC_WRITE
+    )
+    @Query("""
+            SELECT assignment
+            FROM StudentMockTestAssignment assignment
+            JOIN FETCH assignment.studentProfile student
+            JOIN FETCH student.user
+            JOIN FETCH assignment.mockTest mockTest
+            WHERE assignment.id = :assignmentId
+            """)
+    Optional<StudentMockTestAssignment>
+            findByIdForUpdate(
+                    @Param("assignmentId")
+                    Long assignmentId
             );
 }

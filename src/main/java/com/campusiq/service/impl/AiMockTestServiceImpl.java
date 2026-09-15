@@ -47,7 +47,7 @@ public class AiMockTestServiceImpl
 
     private static final int TOTAL_QUESTION_COUNT = 60;
 
-    private static final int PASS_PERCENTAGE = 65;
+    private static final int PASS_PERCENTAGE = 45;
 
     private static final int MAX_DURATION_MINUTES = 180;
 

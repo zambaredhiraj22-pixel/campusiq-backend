@@ -31,7 +31,7 @@ public class MockTest {
 
     private int durationMinutes;
 
-    private int passPercentage = 65;
+    private int passPercentage = 45;
 
     private boolean active;
 }

@@ -48,12 +48,11 @@ import lombok.Setter;
 public class StudentMockTestAssignment {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(
+            strategy = GenerationType.IDENTITY
+    )
     private Long id;
 
-    /*
-     * Student for whom this mock test is assigned.
-     */
     @ManyToOne(
             fetch = FetchType.LAZY,
             optional = false
@@ -64,9 +63,6 @@ public class StudentMockTestAssignment {
     )
     private StudentProfile studentProfile;
 
-    /*
-     * Personalized mock test assigned to the student.
-     */
     @ManyToOne(
             fetch = FetchType.LAZY,
             optional = false
@@ -77,9 +73,6 @@ public class StudentMockTestAssignment {
     )
     private MockTest mockTest;
 
-    /*
-     * Date and time when faculty assigned the test.
-     */
     @Column(
             name = "assigned_at",
             nullable = false,
@@ -87,15 +80,45 @@ public class StudentMockTestAssignment {
     )
     private LocalDateTime assignedAt;
 
-    /*
-     * Allows faculty/backend to enable or disable
-     * this assignment without deleting it.
-     */
     @Column(
             name = "active",
             nullable = false
     )
     private Boolean active = true;
+
+    /*
+     * Number of additional attempts currently allowed
+     * by Faculty.
+     *
+     * 0 = no retake permission
+     * 1 = one additional attempt allowed
+     *
+     * The service consumes one credit when the student
+     * starts a retake.
+     */
+    @Column(
+            name = "retake_credits",
+            nullable = false
+    )
+    private Integer retakeCredits = 0;
+
+    /*
+     * Stores when Faculty most recently granted
+     * retake permission.
+     */
+    @Column(
+            name = "last_retake_granted_at"
+    )
+    private LocalDateTime lastRetakeGrantedAt;
+
+    /*
+     * Stores when the most recent retake permission
+     * was consumed by starting a new attempt.
+     */
+    @Column(
+            name = "last_retake_consumed_at"
+    )
+    private LocalDateTime lastRetakeConsumedAt;
 
     @PrePersist
     protected void onCreate() {
@@ -107,5 +130,43 @@ public class StudentMockTestAssignment {
         if (active == null) {
             active = true;
         }
+
+        if (retakeCredits == null) {
+            retakeCredits = 0;
+        }
+    }
+
+    public int getAvailableRetakeCredits() {
+
+        return retakeCredits == null
+                ? 0
+                : Math.max(
+                        retakeCredits,
+                        0
+                );
+    }
+
+    public void grantOneRetake() {
+
+        retakeCredits = 1;
+
+        lastRetakeGrantedAt =
+                LocalDateTime.now();
+    }
+
+    public void consumeOneRetake() {
+
+        if (getAvailableRetakeCredits() <= 0) {
+
+            throw new IllegalStateException(
+                    "No retake permission is available"
+            );
+        }
+
+        retakeCredits =
+                getAvailableRetakeCredits() - 1;
+
+        lastRetakeConsumedAt =
+                LocalDateTime.now();
     }
 }

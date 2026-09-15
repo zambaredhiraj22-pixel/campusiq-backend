@@ -3,7 +3,6 @@ package com.campusiq.dto;
 import java.time.LocalDateTime;
 import java.util.List;
 
-import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
@@ -11,7 +10,6 @@ import lombok.Setter;
 @Getter
 @Setter
 @NoArgsConstructor
-@AllArgsConstructor
 public class MockTestResponse {
 
     private Long id;
@@ -37,10 +35,8 @@ public class MockTestResponse {
     private boolean personalized;
 
     /*
-     * Used only for personalized AI tests.
-     *
-     * Example:
-     * Java, Python, Spring Boot
+     * Technical skills selected by Faculty for
+     * this personalized AI Mock Test.
      *
      * Manual test:
      * null
@@ -51,10 +47,10 @@ public class MockTestResponse {
      * StudentMockTestAssignment ID.
      *
      * Personalized test:
-     * contains assignment ID
+     * contains assignment ID.
      *
      * Manual test:
-     * null
+     * null.
      */
     private Long assignmentId;
 
@@ -63,18 +59,55 @@ public class MockTestResponse {
      * was assigned to the student.
      *
      * Manual test:
-     * null
+     * null.
      */
     private LocalDateTime assignedAt;
 
     /*
-     * Backward-compatible constructor.
+     * Number of completed attempts made by the
+     * currently logged-in student for this test.
      *
-     * Existing Faculty/Manual Mock Test code already
-     * creates MockTestResponse using these 8 fields.
+     * 0 = first attempt is still available.
+     * 1 or more = Faculty retake permission required.
+     */
+    private long completedAttemptCount;
+
+    /*
+     * Number of additional attempts currently
+     * granted by Faculty.
      *
-     * Keeping this constructor means existing code
-     * will NOT break.
+     * Normally:
+     * 0 = no retake permission.
+     * 1 = one retake is available.
+     */
+    private int retakeCredits;
+
+    /*
+     * true when the student may currently start
+     * this Mock Test.
+     *
+     * First attempt:
+     * true.
+     *
+     * Completed test without permission:
+     * false.
+     *
+     * Completed test with Faculty permission:
+     * true.
+     */
+    private boolean attemptAllowed;
+
+    /*
+     * Human-readable attempt/retake status for
+     * the frontend.
+     */
+    private String attemptStatus;
+
+    /*
+     * Constructor used by existing Manual and
+     * Faculty Mock Test mapping code.
+     *
+     * New retake-related fields receive safe defaults.
      */
     public MockTestResponse(
             Long id,
@@ -87,26 +120,44 @@ public class MockTestResponse {
             boolean active) {
 
         this.id = id;
+
         this.title = title;
+
         this.aptitudeQuestionCount =
                 aptitudeQuestionCount;
+
         this.reasoningQuestionCount =
                 reasoningQuestionCount;
+
         this.technicalQuestionCount =
                 technicalQuestionCount;
+
         this.durationMinutes =
                 durationMinutes;
+
         this.passPercentage =
                 passPercentage;
+
         this.active =
                 active;
 
-        /*
-         * Existing tests are manual by default.
-         */
         this.personalized = false;
+
         this.selectedSkills = null;
+
         this.assignmentId = null;
+
         this.assignedAt = null;
+
+        this.completedAttemptCount = 0L;
+
+        this.retakeCredits = 0;
+
+        this.attemptAllowed = active;
+
+        this.attemptStatus =
+                active
+                        ? "First attempt available"
+                        : "Mock test is inactive";
     }
 }
